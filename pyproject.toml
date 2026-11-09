@@ -9,7 +9,7 @@ description = "Reproducible statistical-acoustics coupled-room GFDN experiments"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
-dependencies = ["pyFDN==0.7.0", "matplotlib>=3.6"]
+dependencies = ["pyFDN==0.7.0", "matplotlib>=3.7"]
 
 [project.optional-dependencies]
 test = ["pytest>=7"]
