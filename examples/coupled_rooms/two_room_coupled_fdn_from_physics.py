@@ -14,22 +14,23 @@ def _():
     from numpy.typing import NDArray, ArrayLike
 
     import pyFDN
-    from pyFDN.build import FDNBuild
-    from pyFDN.auxiliary.physics_based_coupling import (
+    from pyFDN import dss_to_td
+    from sa2gfdn.physics_based_coupling import (
         create_lossless_coupling_matrix, create_diagonal_absorption_matrix,
         create_state_transition_matrix, trajectory, trajectory_with_delays,
-        get_coupling_angles, get_coupling_matrix, get_decay_matrix,
+        match_delay_totals_to_volumes, get_coupling_angles, get_coupling_matrix, get_decay_matrix,
         get_feedback_matrix, get_room_time_varying_matrix, gfdn_energy_ledger)
 
     return (
         ArrayLike,
-        FDNBuild,
+        dss_to_td,
         NDArray,
         block_diag,
         create_diagonal_absorption_matrix,
         create_lossless_coupling_matrix,
         create_state_transition_matrix,
         expm,
+        match_delay_totals_to_volumes,
         get_coupling_angles,
         get_coupling_matrix,
         get_decay_matrix,
@@ -51,6 +52,8 @@ def _(mo):
 
     Pipeline: physical dimensions $\to$ Cremer–Müller generator $\mathbf Q$ $\to$ pairwise angles
     $\mathbf A=\begin{bmatrix}\cos(\theta) I_{N1} & \sin(\theta) I_{N1} \\ -\sin(\theta)  I_{N2} & \cos(\theta)  I_{N2} \end{bmatrix}\operatorname{blkdiag}(\mathbf Q_1,\mathbf Q_2)$.
+    This notebook explores impulse-driven onset. The paper's noise-start SA verification and reproducible exports are in `export_paper_figures.py`.
+
     We then compare the GFDN's **exact** per-line energy ledger against $\mathbf e(t)=e^{t\mathbf Q}\mathbf e(0)$,
     the true physical energy trajectory — for both topologies, side by side.
     """)
@@ -153,42 +156,6 @@ def _(
     return Q, V, beta, gamma, num_rooms
 
 
-@app.cell
-def _(ArrayLike, np):
-    def match_delay_totals_to_volumes(base_delays: ArrayLike, lines_per_group:int, volumes:ArrayLike, target_total=None):
-        """Match integer volume ratios exactly, retaining each group's delay spread.
-
-        Start from independently sampled coprime delays, then apportion integer
-        lengths to exact group totals. No coprimality constraint is imposed on
-        the result. Its total number of cells stays close to the original total.
-        Supply target_total to choose the nearest feasible total to a requested
-        global mean instead of retaining the original sampled total.
-        """
-        volumes = np.asarray(volumes, dtype=float)
-        integer_volumes = np.rint(volumes).astype(np.int64)
-        if np.any(volumes <= 0) or not np.allclose(volumes, integer_volumes):
-            raise ValueError("Exact-ratio comparison requires positive integer volumes.")
-        weights = integer_volumes // np.gcd.reduce(integer_volumes)
-        base = np.asarray(base_delays, dtype=np.int64).reshape(
-            len(volumes), lines_per_group)
-        state_count = base.sum() if target_total is None else target_total
-        multiplier = max(
-            int(np.rint(state_count / weights.sum())),
-            int(np.max(np.ceil(lines_per_group / weights))),
-        )
-        targets = multiplier * weights
-        matched = []
-        for group, target in zip(base, targets):
-            # Reserve one cell per line, then use largest-remainder rounding.
-            ideal = 1 + (target - lines_per_group) * group / group.sum()
-            lengths = np.floor(ideal).astype(np.int64)
-            remainder = int(target - lengths.sum())
-            order = np.argsort(-(ideal - lengths), kind="stable")
-            lengths[order[:remainder]] += 1
-            matched.append(lengths)
-        return np.concatenate(matched)
-
-    return (match_delay_totals_to_volumes,)
 
 
 @app.cell
@@ -212,7 +179,7 @@ def _(Nper, V, avg_delays, match_delay_totals_to_volumes, mo, np, pyFDN):
     delays = match_delay_totals_to_volumes(co_prime_delays, Nroom, V)
 
     delays_per_fdn = np.asarray([delays[:N1], delays[N1:]], dtype=np.int32)
-    M1, M2 = int(d1.sum()), int(d2.sum())
+    M1, M2 = map(int, delays_per_fdn.sum(axis=1))
     _delay_totals = [M1, M2]
     ratio_mismatch = (V[0] / V[1]) / (M1 / M2)
 
@@ -331,7 +298,7 @@ def _(
 
     `get_room_time_varying_matrix` returns the runtime hook
     $H(n)=\tilde{{\Phi}} R(n) \tilde{{\Phi}}^\top$, where $R(n)=\operatorname{{blkdiag}}(R_1(n),R_2(n))$.
-    `process_fdn` applies this hook **after** the static feedback matrix, giving
+    `dss_to_td` applies this hook **after** the static feedback matrix, giving
     $H(n)A_{{\rm lossy}}=\tilde{{\Phi}} R(n)M G$.
     Thus $M_i(n)=R_i(n)M_i$ varies, while $\Phi$ stays fixed. For the lossless
     case, use $G=I$. `is_unilossless(A)` = **{_ok}**.
@@ -343,7 +310,7 @@ def _(
 def _(
     A,
     A_lossy,
-    FDNBuild,
+    dss_to_td,
     N1,
     N2,
     Ntot,
@@ -364,12 +331,8 @@ def _(
 
     # output taken from all rooms
     C_lines = np.eye(Ntot)
-    lossless_build = FDNBuild(
-        A=A, B=B, C=C_lines, D=np.zeros((Ntot, num_rooms)),
-        delays=delays, fs=fs, post_matrix=tv_matrix)
-    lossy_build = FDNBuild(
-        A=A_lossy, B=B, C=C_lines, D=np.zeros((Ntot, num_rooms)),
-        delays=delays, fs=fs, post_matrix=tv_matrix)
+    lossless_build = dss_to_td(A=A, B=B, C=C_lines, D=np.zeros((Ntot, num_rooms)), delays=delays, post_matrix=tv_matrix)
+    lossy_build = dss_to_td(A=A_lossy, B=B, C=C_lines, D=np.zeros((Ntot, num_rooms)), delays=delays, post_matrix=tv_matrix)
     Y = np.zeros((num_rooms, n_samp, Ntot))
     Y_lossy = np.zeros_like(Y)
     for _build, _responses in ((lossless_build, Y), (lossy_build, Y_lossy)):
@@ -378,8 +341,8 @@ def _(
             _input[0, _source] = 1.0
             # The builds share a stateful hook: rewind it for every independent
             # render so source rooms and lossless/lossy cases use the same clock.
-            tv_matrix.reset()
-            _responses[_source] = pyFDN.process_fdn(_input, _build)
+            _build.reset()
+            _responses[_source] = _build.process_signal(_input)
 
     E_ex, n_ex = gfdn_energy_ledger(Y, num_rooms, N1, delays)
     E_ex_lossy, _ = gfdn_energy_ledger(Y_lossy, num_rooms, N1, delays)
@@ -390,8 +353,8 @@ def _(
 def _(mo):
     mo.md("""
     To process audio instead of an impulse, pass an array `x` with two columns
-    (one input per source room) to `pyFDN.process_fdn(x, lossy_build)` or
-    `pyFDN.process_fdn(x, lossless_build)`. Call `tv_matrix.reset()` first for a
+    (one input per source room) to `lossy_build.process_signal(x)` or
+    `lossless_build.process_signal(x)`. Call `tv_matrix.reset()` first for a
     new independent recording. Append zeros to `x` to render the reverberation
     tail; the modulation clock continues through those zeros.
 
@@ -406,14 +369,16 @@ def _(mo):
 def _(Q, fs, gamma, n_samp, np, num_rooms, trajectory):
     # --- True physical trajectory e(t) = expm(Q t) e(0), source = room 1 -------
     tsec = np.arange(n_samp) / fs
-    _, Eref = trajectory(Q, np.array([0.0, 1.0]), np.eye(num_rooms), fs, n_samp)
+    source_room = 1
+    source_energy = np.eye(num_rooms)[source_room]
+    _, Eref = trajectory(Q, source_energy, np.eye(num_rooms), fs, n_samp)
     _, Eref_lossy = trajectory(Q,
-                               np.array([0.0, 1.0]),
+                               source_energy,
                                np.eye(num_rooms),
                                fs,
                                n_samp,
                                gamma=gamma)
-    return Eref, Eref_lossy, tsec
+    return Eref, Eref_lossy, source_room, tsec
 
 
 @app.cell
@@ -429,6 +394,7 @@ def _(
     np,
     num_rooms,
     plt,
+    source_room,
     tsec,
 ):
     # --- The comparison plot -----------------------------------------------------
@@ -443,10 +409,10 @@ def _(
 
     for _ax, _Eex, _Eref, _title in zip(_axs, [E_ex, db(E_ex_lossy)],
                                         [Eref, db(Eref_lossy)],
-                                        ["Lossless, src = R2", "Lossy, src = R2"]):
+                                        [f"Lossless, src = R{source_room+1}", f"Lossy, src = R{source_room+1}"]):
         for _r in range(num_rooms):
             _ax.plot(tsec[:n_ex],
-                     _Eex[1, :, _r],
+                     _Eex[source_room, :, _r],
                      color=_colors[_r],
                      lw=1.1,
                      label=f"GFDN {_labels[_r]}")
@@ -473,13 +439,13 @@ def _(
 
 
 @app.cell
-def _(E_ex, E_ex_lossy, Eref, Eref_lossy, N1, V, delays, mo, n_ex, np):
+def _(E_ex, E_ex_lossy, Eref, Eref_lossy, N1, V, delays, mo, n_ex, np, source_room):
     _tail = slice(int(0.85 * n_ex), n_ex)
 
-    _err = np.max(np.abs(E_ex[0] - Eref[:n_ex]))
-    _err_lossy = np.max(np.abs(E_ex_lossy[0] - Eref_lossy[:n_ex]))
+    _err = np.max(np.abs(E_ex[source_room] - Eref[:n_ex]))
+    _err_lossy = np.max(np.abs(E_ex_lossy[source_room] - Eref_lossy[:n_ex]))
 
-    _gfdn_tail = E_ex[0, _tail].mean(0)
+    _gfdn_tail = E_ex[source_room, _tail].mean(0)
     _gfdn_split = _gfdn_tail / _gfdn_tail.sum()
     _ref_tail = Eref[_tail].mean(0)
     _ref_split = _ref_tail / _ref_tail.sum()
@@ -503,15 +469,13 @@ def _(E_ex, E_ex_lossy, Eref, Eref_lossy, N1, V, delays, mo, n_ex, np):
     | target $V_i/V_{{\rm tot}}$ | {_target_split[0]:.4f} | {_target_split[1]:.4f} |
     | $M_i/M_{{\rm tot}}$ (theoretical GFDN asymptote) | {_equipartition_split[0]:.4f} | {_equipartition_split[1]:.4f} |
 
-    **The GFDN's true long-run target is the $M_i/M_{{\rm tot}}$ row, not $V_i/V_{{\rm tot}}$ directly**
-    — the mixing angle $\theta$ only sets *how fast* the GFDN approaches it, never *where* it ends up.
-    $V_i/V_{{\rm tot}}$ and $M_i/M_{{\rm tot}}$ should be close to each other by design (that's the whole
-    point of $M_i\propto V_i$), but they're two different quantities: if the GFDN row disagrees with
-    $M_i/M_{{\rm tot}}$, suspect insufficient equilibration time (try increasing `dur` well beyond a
-    few relaxation times and see if it keeps drifting toward $M_i/M_{{\rm tot}}$) or something in the
-    live delay-line/matrix realization; if it already matches $M_i/M_{{\rm tot}}$ but that itself is
-    off from $V_i/V_{{\rm tot}}$, the fix is tightening the delay-length design so $M_1/M_2$ lands
-    closer to $V_1/V_2$.
+    **Conditional equilibrium target.** Uniform mean energy per delay cell
+    gives the $M_i/M_{{\rm tot}}$ split. Matching it to room volume is a storage
+    design condition. A fixed orthogonal feedback matrix need not reach that
+    state: persistent correlations and source-dependent modal excitation can
+    sustain a bias. Compare finite-window errors without assuming convergence.
+    The paper's separate noise-start verification is reproduced by
+    `export_paper_figures.py`; these plots explore impulse-driven onset.
     """)
     return
 

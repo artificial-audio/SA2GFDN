@@ -27,10 +27,10 @@ def _():
     from scipy.signal import resample_poly
     from pathlib import Path
 
-    from pyFDN.build import FDNBuild
-    from pyFDN.auxiliary.physics_based_coupling import (
+    from pyFDN import dss_to_td
+    from sa2gfdn.physics_based_coupling import (
         create_lossless_coupling_matrix, create_state_transition_matrix,
-        trajectory, get_coupling_angles, get_coupling_matrix,
+        trajectory, match_delay_totals_to_volumes, get_coupling_angles, get_coupling_matrix,
         get_feedback_matrix, get_room_time_varying_matrix, gfdn_energy_ledger,
     )
 
@@ -39,12 +39,13 @@ def _():
         ArrayLike,
         NDArray,
         Path,
-        FDNBuild,
+        dss_to_td,
         block_diag,
         create_lossless_coupling_matrix,
         create_state_transition_matrix,
         csv,
         expm,
+        match_delay_totals_to_volumes,
         get_coupling_angles,
         get_coupling_matrix,
         get_feedback_matrix,
@@ -95,7 +96,7 @@ def _(mo):
         amplitude absorption. Each build contains `A = F @ M @ G` (lossless: $G=I$).
         The `get_room_time_varying_matrix` hook $F R(n)F^\top$ changes the effective
         feedback to $F R(n)M G$. Thus only $M_i(n)=R_i(n)M_i$ varies.
-        All audio and sweep renders below use `pyFDN.process_fdn`.
+        All audio and sweep renders below use `pyFDN.dss_to_td` graphs.
         """),
         V1, V2, V3, S12, S23, S13, dur, run_sweeps,
         mo.md("Plots are saved in the sibling `GroupedFDN/figures` directory. "
@@ -164,38 +165,8 @@ def _(np):
         logarithm = np.log10(np.abs(values) + 1e-10)
         return 10 * logarithm if is_energy_signal else 20 * logarithm
 
-    def calculate_time_constant(E_ledger, fs: float, is_rising: bool = False) -> float:
-        """
-        Estimates time constant of lossless energy trajectories by analyzing only the early, unclipped data points.
-        """
-        # 1. Isolate the unclipped data (e.g., grab the first 15% of the sample window)
-        # This assumes the system hasn't hit the saturation limit yet in this early window
-        num_samples = len(E_ledger)
-        unclipped_end_idx = int(num_samples * 0.5)
 
-        y_data = E_ledger[:unclipped_end_idx]
-        x_time = np.arange(unclipped_end_idx) / fs
-
-        if not is_rising:
-            # Falling: Fit a straight line to ln(y) -> ln(y) = mx + c
-
-            # where slope m = -1/tau
-            slope, intercept = np.polyfit(x_time, np.log(y_data), 1)
-            tau = -1.0 / slope
-        else:
-            # Rising: Requires estimating the true maximum via an optimization routine
-            from scipy.optimize import curve_fit
-
-            def rising_func(t, E_max, tau_val):
-                return E_max * (1 - np.exp(-t / tau_val))
-
-            # Fit only using the unclipped initial window
-            popt, _ = curve_fit(rising_func, x_time, y_data, p0=[E_ledger[-1]*2, 0.1])
-            tau = popt[1] # Extracted tau value
-
-        return tau
-
-    return calculate_time_constant, db
+    return (db,)
 
 
 @app.cell
@@ -264,7 +235,7 @@ def _(Path, db, np, num_rooms, plt):
         return _E_ss, _ax, _fig
 
 
-    fig_path = Path(__file__).resolve().parents[3] / 'GroupedFDN' / 'figures'
+    fig_path = Path(__file__).resolve().parents[2] / 'outputs' / 'exploratory'
     return fig_path, plot_gfdn_delay_element_distributions
 
 
@@ -280,12 +251,11 @@ def _(mo):
 def _(
     ArrayLike,
     NDArray,
-    FDNBuild,
+    dss_to_td,
     make_room_modulation,
     beta_chain,
     beta_complete,
     block_diag,
-    calculate_time_constant,
     db,
     dur,
     expm,
@@ -359,45 +329,33 @@ def _(
 
         # A = F @ M; the hook inserts room rotations before the fixed F.
         modulation = make_room_modulation(R_room, _Nroom, fs, np.random.get_state())
-        build = FDNBuild(
-            A=A, B=B, C=C_lines, D=np.zeros((Ntot, num_rooms)),
-            delays=delays, fs=fs, post_matrix=modulation)
+        build = dss_to_td(A=A, B=B, C=C_lines, D=np.zeros((Ntot, num_rooms)), delays=delays, post_matrix=modulation)
         Y = np.zeros((num_rooms, n_samp, Ntot))
         for source in range(num_rooms):
             signal = np.zeros((n_samp, num_rooms))
             signal[0, source] = 1
-            modulation.reset()
-            Y[source] = pyFDN.process_fdn(signal, build)
+            build.reset()
+            Y[source] = build.process_signal(signal)
 
         return Y, delays
 
     def get_energy_error(_Y:NDArray, _delays: ArrayLike, _Nroom:int,
-                         _tau_avg:float,  Eref: NDArray, _src:int=0,
-                        _use_transient_calc: bool = False):
+                         _tau_avg:float,  Eref: NDArray, _src:int=0):
         """Calculate the MAE between the GFDN trajectory and Markov trajectory (Eref)"""
 
         _E_ex, _n_ex = gfdn_energy_ledger(_Y, num_rooms, _Nroom, _delays)
         _tail = slice(int(0.85 * _n_ex), _n_ex)
 
-        if _use_transient_calc:
-            _mae_transient = np.zeros(num_rooms, dtype=np.float32)
-            for _k in range(num_rooms):
-                _transient_start_time = calculate_time_constant(_E_ex[_src, :_n_ex, _k], fs, is_rising=_k!=0)
-                _transient_start_samp = int(_transient_start_time * fs)
-                _transient_ind = slice(0, _transient_start_samp)
-                _err_transient = _E_ex[_src, _transient_ind, _k] - Eref[_transient_ind, _k]
-                _mae_transient[_k] = db(np.mean(np.abs(_err_transient)))
-        else:
-            _transient_ind = slice(0, int(0.2 * fs))
-            _err_transient = _E_ex[_src, _transient_ind] - Eref[_transient_ind]
-            _mae_transient = db(np.mean(np.abs(_err_transient), axis=0))
+        _transient_ind = slice(0, min(int(0.2 * fs), _n_ex))
+        _err_transient = _E_ex[_src, _transient_ind] - Eref[_transient_ind]
+        _mae_transient = 100 * np.mean(np.abs(_err_transient), axis=0)
 
         _err = _E_ex[_src] - Eref[:_n_ex]
         _err_tail = _E_ex[_src, _tail] - Eref[_tail]
-        _mae = db(np.mean(np.abs(_err), axis = 0))
-        _mae_tail = db(np.mean(np.abs(_err_tail), axis=0))
+        _mae = 100 * np.mean(np.abs(_err), axis=0)
+        _mae_tail = 100 * np.mean(np.abs(_err_tail), axis=0)
 
-        print(rf"Error for $K_i$={_Nroom}, $\bar{{m}}$={_tau_avg}: Total MAE={np.round(_mae,3)}dB, Late MAE={np.round(_mae_tail, 3)}, Transient MAE=_{np.round(_mae_transient, 3)}")
+        print(rf"Error for $K_i$={_Nroom}, $\bar{{m}}$={_tau_avg}: Total MAE={np.round(_mae,3)} pp, Late MAE={np.round(_mae_tail, 3)}, Transient MAE=_{np.round(_mae_transient, 3)}")
         return (_mae, _mae_tail, _mae_transient)
 
 
@@ -517,9 +475,9 @@ def _(
         # --------------------------------------------------------
         _n_ex = _Y.shape[1] - _delays.max() - 1
         _, _distribution_ax, _distribution_fig = plot_gfdn_delay_element_distributions(
-            _Y[0], _delays, Nroom_values[-1], int(0.85 * _n_ex), _n_ex)
+            _Y[0], _delays, Nroom_values[-2], int(0.85 * _n_ex), _n_ex)
         _distribution_fig.savefig(
-            fig_path / f'delay_line_energy_dist_del_len={_avg_tau}_Ngrp={Nroom_values[-2]}.png',
+            fig_path / f'delay_line_energy_dist_del_len={_avg_tau}_Ngrp={Nroom_values[-2]}_tv.png',
             dpi=300)
         _distribution_plots.append(mo.mpl.interactive(_distribution_fig))
         _ind_slice = np.arange(int(0.85 * _n_ex), _n_ex, dtype=np.int32)
@@ -572,8 +530,9 @@ def _(mo):
 
 @app.cell
 def _(
-    FDNBuild,
+    dss_to_td,
     make_room_modulation,
+    match_delay_totals_to_volumes,
     block_diag,
     create_state_transition_matrix,
     expm,
@@ -582,38 +541,6 @@ def _(
     np,
     pyFDN,
 ):
-    def match_delay_totals_to_volumes(base_delays, lines_per_group, volumes, target_total=None):
-        """Match integer volume ratios exactly, retaining each group's delay spread.
-
-        Start from independently sampled coprime delays, then apportion integer
-        lengths to exact group totals. No coprimality constraint is imposed on
-        the result. Its total number of cells stays close to the original total.
-        Supply target_total to choose the nearest feasible total to a requested
-        global mean instead of retaining the original sampled total.
-        """
-        volumes = np.asarray(volumes, dtype=float)
-        integer_volumes = np.rint(volumes).astype(np.int64)
-        if np.any(volumes <= 0) or not np.allclose(volumes, integer_volumes):
-            raise ValueError("Exact-ratio comparison requires positive integer volumes.")
-        weights = integer_volumes // np.gcd.reduce(integer_volumes)
-        base = np.asarray(base_delays, dtype=np.int64).reshape(
-            len(volumes), lines_per_group)
-        state_count = base.sum() if target_total is None else target_total
-        multiplier = max(
-            int(np.rint(state_count / weights.sum())),
-            int(np.max(np.ceil(lines_per_group / weights))),
-        )
-        targets = multiplier * weights
-        matched = []
-        for group, target in zip(base, targets):
-            # Reserve one cell per line, then use largest-remainder rounding.
-            ideal = 1 + (target - lines_per_group) * group / group.sum()
-            lengths = np.floor(ideal).astype(np.int64)
-            remainder = int(target - lengths.sum())
-            order = np.argsort(-(ideal - lengths), kind="stable")
-            lengths[order[:remainder]] += 1
-            matched.append(lengths)
-        return np.concatenate(matched)
 
     def measure_lossless_energy_errors(
         line_outputs, line_delays, lines_per_group, sa_reference, volumes, fs,
@@ -712,11 +639,8 @@ def _(
                     modulation = make_room_modulation(coupling, lines_per_group, fs, modulation_rng)
                     for varying in (False, True):
                         modulation.reset()
-                        build = FDNBuild(
-                            A=feedback, B=input_gains, C=np.eye(channels),
-                            D=np.zeros((channels, 1)), delays=lengths, fs=fs,
-                            post_matrix=modulation if varying else None)
-                        outputs = pyFDN.process_fdn(impulse, build)
+                        build = dss_to_td(A=feedback, B=input_gains, C=np.eye(channels), D=np.zeros((channels, 1)), delays=lengths, post_matrix=modulation if varying else None)
+                        outputs = build.process_signal(impulse)
                         metrics = measure_lossless_energy_errors(
                             outputs, lengths, lines_per_group, reference, volumes, fs)
                         results.append({
@@ -824,7 +748,7 @@ def _(mo):
 @app.cell
 def _(
     Path,
-    FDNBuild,
+    dss_to_td,
     make_room_modulation,
     block_diag,
     expm,
@@ -888,10 +812,7 @@ def _(
                         name = (f"{topology}_K16_mean2000_{design}_"
                                 f"{'lossy' if lossy else 'lossless'}_"
                                 f"{'varying' if varying else 'fixed'}_srcR1")
-                        build = FDNBuild(
-                            A=feedback @ G if lossy else feedback, B=B, C=C,
-                            D=np.zeros((groups, 1)), delays=lengths, fs=fs,
-                            post_matrix=modulation if varying else None)
+                        build = dss_to_td(A=feedback @ G if lossy else feedback, B=B, C=C, D=np.zeros((groups, 1)), delays=lengths, post_matrix=modulation if varying else None)
                         networks.append((name, lengths, build, varying))
         names = [f"{p.stem}__{name}_recR{r+1}.wav"
                  for p in stimuli for name, _, _, _ in networks for r in range(groups)]
@@ -913,10 +834,8 @@ def _(
                 for name, lengths, build, varying in networks:
                     wet = np.empty((len(padded), groups, dry.shape[1]))
                     for channel in range(dry.shape[1]):
-                        if build.post_matrix is not None:
-                            build.post_matrix.reset()
-                        wet[:, :, channel] = pyFDN.process_fdn(
-                            padded[:, channel:channel+1], build)
+                        build.reset()
+                        wet[:, :, channel] = build.process_signal(padded[:, channel:channel+1])
                     if not np.isfinite(wet).all():
                         raise ValueError(f"Non-finite output in {name}")
                     for receiver in range(groups):
@@ -947,7 +866,7 @@ def _(
                     record["listening_gain"] = gain
                 records.extend(pending)
         manifest = {
-            "processing": "Direct pyFDN.process_fdn; zero initial state; wet only; no convolution.",
+            "processing": "Direct pyFDN.dss_to_td graph; zero initial state; wet only; no convolution.",
             "lines_per_group": lines, "target_global_mean_delay_samples": mean_delay,
             "sample_rate": fs, "tail_seconds": tail_seconds, "matrix_seed": matrix_seed,
             "volumes_m3": volumes.tolist(), "absorption_coefficients": list(absorption),
@@ -976,7 +895,7 @@ def _(
 
 @app.cell
 def _(Path, mo):
-    _grouped_fdn = Path(__file__).resolve().parents[3] / "GroupedFDN"
+    _grouped_fdn = Path(__file__).resolve().parents[2] / "outputs"
     wet_stimulus_directory = mo.ui.text(
         value=str(_grouped_fdn / "DiffGFDN/audio/sound_examples/stimulus"), label="Stimulus folder")
     wet_output_directory = mo.ui.text(

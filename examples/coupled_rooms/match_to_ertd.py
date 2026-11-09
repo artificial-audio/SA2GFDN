@@ -7,6 +7,7 @@ app = marimo.App(width="medium")
 @app.cell
 def _():
     import marimo as mo
+    from sa2gfdn.acoustics import calculate_energy_envelope
     import numpy as np
     import matplotlib.pyplot as plt
 
@@ -17,26 +18,26 @@ def _():
     from numpy.typing import NDArray, ArrayLike
 
     import pyFDN
-    from pyFDN.td import TimeVaryingMatrix
-    from pyFDN.auxiliary.geometry import (get_plane_area, get_room_volume,
+    from sa2gfdn.geometry import (get_plane_area, get_room_volume,
                                           get_room_surface_area,
                                           get_room_absorptive_area,
                                           point_in_room, solid_angle_quad,
                                           find_room, get_point_to_room_weights,
                                           Aperture)
-    from pyFDN.auxiliary.physics_based_coupling import (
+    from sa2gfdn.physics_based_coupling import (
         create_lossless_coupling_matrix, create_diagonal_absorption_matrix,
         create_state_transition_matrix, trajectory, trajectory_with_delays,
         get_coupling_angles, get_coupling_matrix, get_decay_matrix,
-        get_feedback_matrix, run_gfdn, gfdn_energy_ledger,
+        get_feedback_matrix, get_room_time_varying_matrix, run_gfdn, gfdn_energy_ledger,
         room_energy_ledger_from_rirs)
 
     return (
+        calculate_energy_envelope,
         Aperture,
         ArrayLike,
         NDArray,
         Path,
-        TimeVaryingMatrix,
+        get_room_time_varying_matrix,
         Tuple,
         Union,
         block_diag,
@@ -444,6 +445,7 @@ def _(
 
 @app.cell
 def _(
+    calculate_energy_envelope,
     ROOM_DIMS,
     ROOM_START,
     all_rec_pos,
@@ -457,7 +459,7 @@ def _(
     fdtd_room_energy, room_masks = room_energy_ledger_from_rirs(
         all_rirs, dataset_to_sim_mic_pos(all_rec_pos), ROOM_START, ROOM_DIMS)
 
-    fdtd_energy_env = pyFDN.auxiliary.acoustics.calculate_energy_envelope(
+    fdtd_energy_env = calculate_energy_envelope(
         fdtd_room_energy, fs, smooth_time_ms=100, time_axis=-1)
 
     mo.md(
@@ -556,7 +558,7 @@ def _(
     N2,
     Ntot,
     R_room,
-    TimeVaryingMatrix,
+    get_room_time_varying_matrix,
     block_diag,
     delays_per_fdn,
     fs,
@@ -573,7 +575,7 @@ def _(
     modulation_frequency = 1.0  # hz
     modulation_amplitude = 3.0
     spread = 0.3
-    tv_matrix = TimeVaryingMatrix(Ntot, modulation_frequency,
+    tv_matrix = get_room_time_varying_matrix(R_room, N1, modulation_frequency,
                                   modulation_amplitude, fs, spread)
 
     Qblocks = block_diag(pyFDN.random_orthogonal(N1),
@@ -619,7 +621,6 @@ def _(
                        C_lines,
                        delays,
                        n_samp,
-                       _src=1,
                        tv_matrix=tv_matrix)
     E_ex_lossy, n_ex = gfdn_energy_ledger(Y_lossy, num_rooms, N1, delays)
 

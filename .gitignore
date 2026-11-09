@@ -148,3 +148,5 @@ profile_default/
 # Matlab
 *.m
 *.lock
+
+outputs/

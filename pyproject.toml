@@ -1,224 +1,29 @@
 [build-system]
-requires = ["setuptools>=77.0.0"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pyFDN"
-version = "0.5.0"
-description = "Python library for Feedback Delay Networks"
-readme = "README.rst"
-authors = [
-  {name = "Sebastian J. Schlecht"},
-  {name = "Facundo Franchino"},
-  {name = "Jeremy Bai"},
-]
-maintainers = [
-  {name = "Facundo Franchino"},
-  {name = "Sebastian J. Schlecht"},
-]
-classifiers = [
-    "Development Status :: 3 - Alpha",
-    "Intended Audience :: Science/Research",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.14",
-]
+name = "sa2gfdn"
+version = "0.1.0"
+description = "Reproducible statistical-acoustics coupled-room GFDN experiments"
+readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
-license-files = [
-    "LICENSE",
-    "src/pyFDN/resources/ATTRIBUTION.md",
-    "src/pyFDN/resources/licenses/*.txt",
-]
-dependencies = [
-  "numpy",
-  "soundfile",
-  "scipy",
-  "flamo>=0.2.20",  # canonical module devices (string "cpu"/"cuda" mix with .to())
-]
+dependencies = ["pyFDN==0.7.0", "matplotlib>=3.6"]
 
 [project.optional-dependencies]
-examples = [
-    "marimo",  # the example notebooks are marimo apps
-    "adac",  # example_fdn_to_faust compiles a FLAMO model to FAUST
-    "matplotlib>=3.5.0",  # examples build matplotlib figures
-    "multislope>=0.1.1",  # multi-slope decay estimation (DecayFitNet), example only
-    "pyroomacoustics",  # shoebox image-source RIRs for example_reverberation_enhancement
-]
-test = [
-    "marimo",  # deps to run the example notebooks under test
-    "adac",
-    "matplotlib>=3.5.0",
-    "multislope>=0.1.1",
-    "pyroomacoustics",
-    "pytest>=7.0.0",  # testing
-    "pytest-cov>=4.0.0",  # coverage plugin for pytest
-    "coverage>=7.0.0",  # coverage tooling
-]
-dev = [
-    "pyFDN[test]",  # everything from [test] (and transitively [examples])
-    "tox>=4.0.0",  # multi-environment testing
-    "ruff>=0.1.0",  # linting
-    "mypy>=1.0.0",  # type checking
-    "twine>=4.0.0",  # packaging
-    "wheel>=0.40.0",  # packaging
-    "build>=0.10.0",  # packaging
-    "bump-my-version>=1.0.0",  # version management
-    "watchdog>=3.0.0",  # development tools
-    "pre-commit>=3.0.0",  # git hooks
-]
-docs = [
-    "Sphinx>=6.0.0",
-    "pydata-sphinx-theme>=0.15.0",
-    "sphinx-autodoc-typehints>=1.0.0",
-    "sphinx-design>=0.5.0",
-    "sphinx-copybutton>=0.5.0",
-    "sphinx-marimo",
-    "nbsphinx>=0.9.0",
-    "ipykernel>=6.0.0",
-    "pandoc>=2.0",
-    "matplotlib>=3.5.0",
-    "multislope>=0.1.1",  # rendered by the multi-slope example notebook
-    "pyroomacoustics",  # rendered by the reverberation-enhancement notebook
-    "adac",  # example_fdn_to_faust is rendered into the docs
-]
-
-[project.urls]
-bugs = "https://github.com/artificial-audio/pyFDN/issues"
-changelog = "https://github.com/artificial-audio/pyFDN/releases"
-homepage = "https://github.com/artificial-audio/pyFDN"
+test = ["pytest>=7"]
+notebooks = ["marimo", "multislope>=0.1.1", "scikit-learn"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["pyFDN*"]
-
-[tool.setuptools.package-data]
-"pyFDN.resources" = [
-    "ATTRIBUTION.md",
-    "references.bib",
-    "licenses/*.txt",
-    "audio/metadata.json",
-    "audio/*/*.wav",
-    "presets/colorless_FDN/*.json",
-]
-
-# Bump My Version
-# ---------------
-# Keeps the two version strings (this file and src/pyFDN/__init__.py) in sync
-# and tags the release as v{new_version}, which .github/workflows/release.yml
-# triggers on. Usage: bump-my-version bump {major|minor|patch}
-
-[tool.bumpversion]
-current_version = "0.5.0"
-allow_dirty = false
-commit = true
-message = "Bump version: {current_version} → {new_version}"
-tag = true
-tag_name = "v{new_version}"
-tag_message = "Release v{new_version}"
-
-[[tool.bumpversion.files]]
-filename = "pyproject.toml"
-search = 'version = "{current_version}"'
-replace = 'version = "{new_version}"'
-
-[[tool.bumpversion.files]]
-filename = "src/pyFDN/__init__.py"
-search = '__version__ = "{current_version}"'
-replace = '__version__ = "{new_version}"'
-
-# Pytest
-# ------
+include = ["sa2gfdn*"]
 
 [tool.pytest.ini_options]
-filterwarnings = [
-    "ignore:FigureCanvasAgg is non-interactive:UserWarning",
-    # netCDF4 1.7.x ships abi3 (limited-API) wheels whose Cython binary-compat
-    # check reports a stale numpy.ndarray struct size under numpy 2.x. Reached
-    # transitively (flamo -> pyfar -> sofar -> netCDF4); the warning is benign.
-    "ignore:numpy.ndarray size changed:RuntimeWarning",
-]
+filterwarnings = ["ignore:numpy.ndarray size changed:RuntimeWarning"]
 
-# Mypy
-# ----
-
-[tool.mypy]
-files = "src"
-mypy_path = "src"
-
-# Use strict defaults
-strict = true
-warn_unreachable = true
-warn_no_return = true
-# numpy stubs legitimately return Any for many ufunc/indexing operations
-disable_error_code = ["no-any-return"]
-
-[[tool.mypy.overrides]]
-# Third-party packages without complete PEP 561 typing metadata
-module = [
-    "flamo.*",
-    "marimo.*",
-    "mpl_toolkits.*",
-    "multislope.*",
-    "scipy.*",
-    "soundfile",
-    "torchaudio.*",
-]
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-# Tests: relaxed — focus on source correctness, not test annotation coverage
-module = "tests.*"
-allow_untyped_defs = true
-disable_error_code = [
-    "attr-defined",
-    "no-untyped-call",
-    "unused-ignore",
-    "call-arg",      # test API mismatches caught here are tracked as issues
-    "arg-type",
-    "override",
-    "return-value",
-    "no-untyped-def",
-]
-
-[[tool.mypy.overrides]]
-# Examples: demo scripts, not library code
-module = "examples.*"
-allow_untyped_defs = true
-disable_error_code = ["no-untyped-call", "no-untyped-def", "attr-defined"]
-
-[[tool.mypy.overrides]]
-# Docs: Sphinx config
-module = "docs.*"
-allow_untyped_defs = true
-disable_error_code = ["no-untyped-call", "no-untyped-def"]
-
-[[tool.mypy.overrides]]
-# SDN: complex geometry/simulation research code, annotation work in progress
-module = "pyFDN.generate.SDN"
-allow_untyped_defs = true
-disable_error_code = ["no-untyped-call", "no-untyped-def", "attr-defined", "type-var"]
-
-[[tool.mypy.overrides]]
-# Allpass completion: complex optimisation code, annotation work in progress
-module = "pyFDN.generate.allpass_FDN.allpass_completion"
-allow_untyped_defs = true
-disable_error_code = ["no-untyped-call", "no-untyped-def"]
-
-[[tool.mypy.overrides]]
-# FLAMO integration helpers: depends on untyped external library
-module = "pyFDN.auxiliary.flamo"
-allow_untyped_defs = true
-disable_error_code = ["no-untyped-call", "no-untyped-def"]
-
-[[tool.mypy.overrides]]
-# Acoustics helpers: ArrayLike-heavy DSP code
-module = "pyFDN.auxiliary.acoustics"
-disable_error_code = ["operator", "index", "arg-type"]
-
-# Configure the max output size in Marimo notebooks
 [tool.marimo.runtime]
-output_max_bytes = 80_000_000
-# Allow notebooks launched directly from the repository to import the src-layout
-# package without relying on the repository's documentation package.
 pythonpath = ["src"]
+
+[tool.setuptools.package-data]
+sa2gfdn = ["paper_mixers.json"]
